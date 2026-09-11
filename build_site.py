@@ -3,6 +3,21 @@
 import json, math, datetime
 
 coins = json.load(open('coins.json'))
+ledger = json.load(open('ledger.json'))
+
+# slugs whose Ledger match is a token/bridged variant, not clearly the native PoW chain
+LEDGER_TOKEN_ONLY = {'xec-ecash', 'alph-alephium', 'dingo-dingocoin', 'nexa-nexa'}
+
+for c in coins:
+    m = ledger.get(c['slug'])
+    if not m:
+        c['ledger'] = 'no'; c['ledger_detail'] = None
+    elif c['slug'] in LEDGER_TOKEN_ONLY:
+        c['ledger'] = 'token'
+        c['ledger_detail'] = m
+    else:
+        c['ledger'] = 'yes'
+        c['ledger_detail'] = m
 
 ALGO_GROUPS = {}
 for c in coins:
@@ -49,6 +64,11 @@ data_js = json.dumps([{
     'block_reward': c.get('block_reward'), 'block_time': c.get('block_time_s'),
     'emission': c.get('daily_emission_usd'), 'yield_pct': c.get('miner_yield_pct'),
     'score': c.get('score'), 'url': c['url'],
+    'ledger': c.get('ledger'),
+    'ledger_send': (c.get('ledger_detail') or {}).get('send'),
+    'ledger_buy': (c.get('ledger_detail') or {}).get('buy'),
+    'ledger_swap': (c.get('ledger_detail') or {}).get('swap'),
+    'ledger_url': (c.get('ledger_detail') or {}).get('url'),
 } for c in coins], separators=(',', ':'))
 
 today = datetime.date.today().isoformat()
@@ -97,6 +117,16 @@ tr:hover td{background:#182142}
 td a{color:var(--txt);text-decoration:none;font-weight:600}
 td a:hover{color:var(--accent)}
 .pos{color:var(--green)}.neut{color:var(--gold)}.dim{color:var(--dim)}
+.lg-yes{color:var(--green);font-weight:600}
+.lg-token{color:var(--gold)}
+.lg-no{color:var(--dim)}
+.lbadge{display:inline-block;font-size:.68rem;border-radius:20px;padding:1px 8px;margin-left:6px;vertical-align:2px}
+.lbadge.yes{background:#123d2c;color:var(--green)}
+.lbadge.token{background:#3d3312;color:var(--gold)}
+.ledgergrid{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:center}
+@media(max-width:780px){.ledgergrid{grid-template-columns:1fr}}
+.ledgerlist{font-size:.82rem;line-height:1.9}
+.ledgerlist b{color:var(--green)}
 .tablewrap{max-height:640px;overflow:auto;border-radius:10px}
 .footer{color:var(--dim);font-size:.78rem;margin-top:30px}
 .footer a{color:var(--accent)}
@@ -128,6 +158,15 @@ td a:hover{color:var(--accent)}
 </div>
 
 <div class="panel">
+<h2>Ledger hardware-wallet compatibility</h2>
+<p class="note">Checked against Ledger's official supported-assets database (ledger.com/supported-crypto-assets). "Native" = the PoW chain itself is supported in Ledger Live or via Ledger device; "token only" = Ledger lists a bridged/token version (e.g. BEP-20), not clearly the native mined chain &mdash; verify before relying on it.</p>
+<div class="ledgergrid">
+<div class="chartbox" style="height:300px"><canvas id="cLedger"></canvas></div>
+<div class="ledgerlist" id="ledgerList"></div>
+</div>
+</div>
+
+<div class="panel">
 <h2>Top potential picks</h2>
 <p class="note">Composite score: 40% miner-revenue size + 35% market cap (liquidity/staying power) + 25% yield sweet-spot (peaks ~30%/yr). Transparent &amp; mechanical, not financial advice.</p>
 <div class="cards" id="cards"></div>
@@ -140,7 +179,7 @@ td a:hover{color:var(--accent)}
 <th data-k="symbol">Coin</th><th data-k="algo">Algorithm</th><th data-k="price">Price</th>
 <th data-k="mcap">Market cap</th><th data-k="hashrate_hs">Net hashrate</th>
 <th data-k="emission">Miner rev/day</th><th data-k="yield_pct">Yield %/yr</th>
-<th data-k="score">Score</th></tr></thead><tbody></tbody></table></div>
+<th data-k="ledger">Ledger</th><th data-k="score">Score</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <p class="footer">Source: <a href="https://www.asicminervalue.com/coins">asicminervalue.com/coins</a> (85 coin pages, structured data). Revenue pool = block_reward &times; 86400/block_time &times; price. Coins showing &mdash; lack price/reward data upstream. Nothing here is financial advice; PoW mining profits depend on your hardware, electricity cost and pool luck.</p>
@@ -164,6 +203,7 @@ document.getElementById('stats').innerHTML=[
  ['<b>'+algos.length+'</b><span>mining algorithms</span>'],
  ['<b>'+fmt$(totalEm)+'</b><span>paid to miners / day (all coins)</span>'],
  ['<b>'+live.length+'</b><span>chains actively emitting</span>'],
+ ['<b>'+DATA.filter(c=>c.ledger==='yes').length+'</b><span>Ledger-compatible (native)</span>'],
 ].map(s=>'<div class="stat">'+s+'</div>').join('');
 
 const PALETTE=['#4f8ff7','#f7c948','#3ddc97','#ff6b6b','#a78bfa','#f97316','#22d3ee','#e879f9','#84cc16','#fb7185'];
@@ -196,10 +236,28 @@ new Chart(cYield,{type:'bar',data:{labels:yd.map(c=>c.symbol),
  tooltip:{callbacks:{label:x=>' '+x.raw.toFixed(1)+'% of mcap paid to miners per year'}}},
  scales:{x:{type:'logarithmic',title:{display:true,text:'% of market cap / year (log)'}}}}});
 
-// 4. cards
+// 4. ledger compatibility
+const lgYes=DATA.filter(c=>c.ledger==='yes'), lgTok=DATA.filter(c=>c.ledger==='token'), lgNo=DATA.filter(c=>c.ledger==='no');
+new Chart(cLedger,{type:'doughnut',data:{labels:['Native support ('+lgYes.length+')','Token only ('+lgTok.length+')','Not supported ('+lgNo.length+')'],
+ datasets:[{data:[lgYes.length,lgTok.length,lgNo.length],backgroundColor:['#3ddc97','#f7c948','#2a3558'],borderColor:'#131a30',borderWidth:3}]},
+ options:{maintainAspectRatio:false,cutout:'62%',plugins:{legend:{position:'bottom'},
+ tooltip:{callbacks:{label:x=>' '+x.label+' \\u2014 '+(x.raw/DATA.length*100).toFixed(0)+'% of 85'}}}}});
+// dedupe multi-algo entries (DGB x2, QUAI x3) for the name list
+const seen=new Set();
+const lgNames=lgYes.filter(c=>{const k=c.symbol+c.name;if(seen.has(k))return false;seen.add(k);return true;})
+ .sort((a,b)=>(b.mcap||0)-(a.mcap||0)).map(c=>c.symbol);
+const seenT=new Set();
+const tokNames=lgTok.filter(c=>{const k=c.symbol;if(seenT.has(k))return false;seenT.add(k);return true;}).map(c=>c.symbol);
+document.getElementById('ledgerList').innerHTML=
+ '<p><b>'+lgNames.length+' coins natively Ledger-compatible:</b><br>'+lgNames.join(', ')+'</p>'+
+ '<p style="margin-top:10px"><span style="color:var(--gold)">Token/bridged only:</span> '+tokNames.join(', ')+'</p>'+
+ '<p style="margin-top:10px" class="dim">Notable gaps: BSV, ETHW, Namecoin, Groestlcoin, Komodo and most small/zombie chains need third-party or paper wallets.</p>';
+
+// 5. cards
 const picks=DATA.filter(c=>c.score!=null).sort((a,b)=>b.score-a.score).slice(0,10);
 document.getElementById('cards').innerHTML=picks.map((c,i)=>
- '<div class="card"><span class="rank">#'+(i+1)+'</span><h3>'+c.name+' <span class="dim">'+c.symbol+'</span></h3>'+
+ '<div class="card"><span class="rank">#'+(i+1)+'</span><h3>'+c.name+' <span class="dim">'+c.symbol+'</span>'+
+ (c.ledger==='yes'?'<span class="lbadge yes">Ledger</span>':c.ledger==='token'?'<span class="lbadge token">Ledger:token</span>':'')+'</h3>'+
  '<span class="algo">'+c.algo+'</span><dl>'+
  '<dt>Miners earn</dt><dd>'+fmt$(c.emission)+' / day</dd>'+
  '<dt>Market cap</dt><dd>'+fmt$(c.mcap)+'</dd>'+
@@ -207,8 +265,11 @@ document.getElementById('cards').innerHTML=picks.map((c,i)=>
  '<div class="scorebar"><i style="width:'+c.score+'%"></i></div>'+
  '<dl><dd class="dim">score '+c.score+'</dd></dl></div>').join('');
 
-// 5. table
+// 6. table
 let sortK='score',sortDir=-1;
+const lgCell=c=>c.ledger==='yes'
+ ?'<a class="lg-yes" href="'+(c.ledger_url||'https://www.ledger.com/supported-crypto-assets')+'" target="_blank" rel="noopener">\\u2713 native</a>'
+ :c.ledger==='token'?'<span class="lg-token">\\u25cb token</span>':'<span class="lg-no">\\u2014</span>';
 function render(){
  const rows=DATA.slice().sort((a,b)=>{
   const av=a[sortK],bv=b[sortK];
@@ -218,7 +279,7 @@ function render(){
   '<tr><td><a href="'+c.url+'" target="_blank" rel="noopener">'+(c.symbol||c.slug)+'</a> <span class="dim">'+(c.name||'')+'</span></td>'+
   '<td>'+(c.algo||'\\u2014')+'</td><td>'+fmtP(c.price)+'</td><td>'+fmt$(c.mcap)+'</td>'+
   '<td>'+(c.hashrate||'\\u2014')+'</td><td class="'+(c.emission>1e5?'pos':c.emission>0?'neut':'dim')+'">'+fmt$(c.emission)+'</td>'+
-  '<td>'+fmtY(c.yield_pct)+'</td><td>'+(c.score==null?'\\u2014':c.score)+'</td></tr>').join('');
+  '<td>'+fmtY(c.yield_pct)+'</td><td>'+lgCell(c)+'</td><td>'+(c.score==null?'\\u2014':c.score)+'</td></tr>').join('');
 }
 document.querySelectorAll('#tbl th').forEach(th=>th.onclick=()=>{
  const k=th.dataset.k;
